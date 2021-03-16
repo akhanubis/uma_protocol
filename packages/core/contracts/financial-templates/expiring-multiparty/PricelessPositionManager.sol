@@ -85,6 +85,9 @@ contract PricelessPositionManager is FeePayer {
     // Minimum number of tokens in a sponsor's position.
     FixedPoint.Unsigned public minSponsorTokens;
 
+    // Minimum amount of collateral required to create a new position.
+    FixedPoint.Unsigned public minCreationCollateral;
+
     // The expiry price pulled from the DVM.
     FixedPoint.Unsigned public expiryPrice;
 
@@ -168,6 +171,7 @@ contract PricelessPositionManager is FeePayer {
      * @param _finderAddress UMA protocol Finder used to discover other protocol contracts.
      * @param _priceIdentifier registered in the DVM for the synthetic.
      * @param _minSponsorTokens minimum amount of collateral that must exist at any time in a position.
+     * @param _minCreationCollateral minimum amount of collateral required to create a new position.
      * @param _timerAddress Contract that stores the current time in a testing environment.
      * Must be set to 0x0 for production environments that use live time.
      * @param _financialProductLibraryAddress Contract providing contract state transformations.
@@ -180,6 +184,7 @@ contract PricelessPositionManager is FeePayer {
         address _finderAddress,
         bytes32 _priceIdentifier,
         FixedPoint.Unsigned memory _minSponsorTokens,
+        FixedPoint.Unsigned memory _minCreationCollateral,
         address _timerAddress,
         address _financialProductLibraryAddress
     ) public FeePayer(_collateralAddress, _finderAddress, _timerAddress) nonReentrant() {
@@ -190,6 +195,7 @@ contract PricelessPositionManager is FeePayer {
         withdrawalLiveness = _withdrawalLiveness;
         tokenCurrency = ExpandedIERC20(_tokenAddress);
         minSponsorTokens = _minSponsorTokens;
+        minCreationCollateral = _minCreationCollateral;
         priceIdentifier = _priceIdentifier;
 
         // Initialize the financialProductLibrary at the provided address.
@@ -446,6 +452,9 @@ contract PricelessPositionManager is FeePayer {
 
         require(positionData.withdrawalRequestPassTimestamp == 0, "Pending withdrawal");
         require(positionData.creationRequestPassTimestamp == 0, "Pending creation");
+        if (positionData.rawCollateral.isEqual(0)) {
+            require(collateralAmount.isGreaterThanOrEqual(minCreationCollateral), "Below minimum collateral amount");
+        }
         if (positionData.tokensOutstanding.isEqual(0)) {
             require(numTokens.isGreaterThanOrEqual(minSponsorTokens), "Below minimum sponsor position");
             emit NewSponsor(msg.sender);
@@ -483,8 +492,10 @@ contract PricelessPositionManager is FeePayer {
 
         require(positionData.withdrawalRequestPassTimestamp == 0, "Pending withdrawal");
         require(positionData.creationRequestPassTimestamp == 0, "Pending creation");
+        if (positionData.rawCollateral.isEqual(0)) {
+            require(collateralAmount.isGreaterThanOrEqual(minCreationCollateral), "Below minimum collateral amount");
+        }
         if (positionData.tokensOutstanding.isEqual(0)) {
-            require(false, "TODO: min collateral amount so liq is always profitable after gas");
             require(numTokens.isGreaterThanOrEqual(minSponsorTokens), "Below minimum sponsor position");
         }
 
