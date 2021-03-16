@@ -52,6 +52,9 @@ contract PricelessPositionManager is FeePayer {
         FixedPoint.Unsigned rawCollateral;
         // Tracks pending transfer position requests. A transfer position request is pending if `transferPositionRequestPassTimestamp != 0`.
         uint256 transferPositionRequestPassTimestamp;
+        // Tracks pending creation requests. A creation request is pending if `creationRequestPassTimestamp != 0`.
+        uint256 withdrawalRequestPassTimestamp;
+        FixedPoint.Unsigned withdrawalRequestAmount;
     }
 
     // Maps sponsor addresses to their positions. Each sponsor can have only one position.
@@ -145,6 +148,11 @@ contract PricelessPositionManager is FeePayer {
         _;
     }
 
+    modifier noPendingCreation(address sponsor) {
+        _positionHasNoPendingCreation(sponsor);
+        _;
+    }
+
     /**
      * @notice Construct the PricelessPositionManager
      * @dev Deployer of this contract should consider carefully which parties have ability to mint and burn
@@ -221,6 +229,7 @@ contract PricelessPositionManager is FeePayer {
         public
         onlyPreExpiration()
         noPendingWithdrawal(msg.sender)
+        noPendingCreation(msg.sender)
         nonReentrant()
     {
         require(
@@ -269,6 +278,7 @@ contract PricelessPositionManager is FeePayer {
         public
         onlyPreExpiration()
         noPendingWithdrawal(sponsor)
+        noPendingCreation(msg.sender)
         fees()
         nonReentrant()
     {
@@ -306,6 +316,7 @@ contract PricelessPositionManager is FeePayer {
         public
         onlyPreExpiration()
         noPendingWithdrawal(msg.sender)
+        noPendingCreation(msg.sender)
         fees()
         nonReentrant()
         returns (FixedPoint.Unsigned memory amountWithdrawn)
@@ -335,6 +346,7 @@ contract PricelessPositionManager is FeePayer {
         public
         onlyPreExpiration()
         noPendingWithdrawal(msg.sender)
+        noPendingCreation(msg.sender)
         nonReentrant()
     {
         PositionData storage positionData = _getPositionData(msg.sender);
@@ -433,6 +445,7 @@ contract PricelessPositionManager is FeePayer {
         );
 
         require(positionData.withdrawalRequestPassTimestamp == 0, "Pending withdrawal");
+        require(positionData.creationRequestPassTimestamp == 0, "Pending creation");
         if (positionData.tokensOutstanding.isEqual(0)) {
             require(numTokens.isGreaterThanOrEqual(minSponsorTokens), "Below minimum sponsor position");
             emit NewSponsor(msg.sender);
@@ -454,6 +467,90 @@ contract PricelessPositionManager is FeePayer {
     }
 
     /**
+     * @notice Starts a creation request that, if passed, allows the sponsor to mint` from their position.
+     * @dev The request will be pending for `withdrawalLiveness`, during which the position can be liquidated.
+     * @param collateralAmount is the number of collateral tokens to collateralize the position with
+     * @param numTokens is the number of tokens to request to mint from the position.
+     */
+    function requestCreation(FixedPoint.Unsigned memory collateralAmount, FixedPoint.Unsigned memory numTokens)
+        public
+        onlyPreExpiration()
+        noPendingWithdrawal(msg.sender)
+        noPendingCreation(msg.sender)
+        nonReentrant()
+    {
+        PositionData storage positionData = _getPositionData(msg.sender);
+
+        require(positionData.withdrawalRequestPassTimestamp == 0, "Pending withdrawal");
+        require(positionData.creationRequestPassTimestamp == 0, "Pending creation");
+        if (positionData.tokensOutstanding.isEqual(0)) {
+            require(false, "TODO: min collateral amount so liq is always profitable after gas");
+            require(numTokens.isGreaterThanOrEqual(minSponsorTokens), "Below minimum sponsor position");
+        }
+
+        // Increase the position and global collateral balance by collateral amount.
+        _incrementCollateralBalances(positionData, collateralAmount);
+
+        // Make sure the proposed expiration of this request is not post-expiry.
+        uint256 requestPassTime = getCurrentTime().add(withdrawalLiveness);
+        require(requestPassTime < expirationTimestamp);
+
+        // Update the position object for the user.
+        positionData.creationRequestPassTimestamp = requestPassTime;
+        positionData.creationRequestAmount = collateralAmount;
+
+        emit RequestCreation(msg.sender, collateralAmount.rawValue, numTokens.rawValue);
+
+        // Transfer tokens into the contract from caller.
+        collateralCurrency.safeTransferFrom(msg.sender, address(this), collateralAmount.rawValue);
+    }
+
+    /**
+     * @notice After a passed creation request (i.e., by a call to `requestCreation` and waiting
+     * `withdrawalLiveness`), mints `positionData.creationRequestAmount` tokens.
+     * @return amountMinted The actual amount of tokens minted.
+     */
+    function createPassedRequest()
+        external
+        onlyPreExpiration()
+        fees()
+        nonReentrant()
+        returns (FixedPoint.Unsigned memory amountMinted)
+    {
+        PositionData storage positionData = _getPositionData(msg.sender);
+        require(
+            positionData.creationRequestPassTimestamp != 0 &&
+                positionData.creationRequestPassTimestamp <= getCurrentTime()
+        );
+
+        FixedPoint.Unsigned memory amountToMint = positionData.creationRequestAmount;
+
+        // Add the number of tokens created to the position's outstanding tokens.
+        positionData.tokensOutstanding = positionData.tokensOutstanding.add(amountToMint);
+
+        totalTokensOutstanding = totalTokensOutstanding.add(amountToMint);
+
+        // Reset creation request by setting creation amount and creation timestamp to 0.
+        _resetCreationRequest(positionData);
+
+        emit RequestCreationExecuted(msg.sender, amountToMint.rawValue);
+        require(tokenCurrency.mint(msg.sender, amountToMint.rawValue));
+    }
+
+    /**
+     * @notice Cancels a pending creation request.
+     */
+    function cancelCreation() external nonReentrant() {
+        PositionData storage positionData = _getPositionData(msg.sender);
+        require(positionData.creationRequestPassTimestamp != 0);
+
+        emit RequestCreationCanceled(msg.sender, positionData.creationRequestAmount.rawValue);
+
+        // Reset creation request by setting creation amount and creation timestamp to 0.
+        _resetCreationRequest(positionData);
+    }
+
+    /**
      * @notice Burns `numTokens` of `tokenCurrency` to decrease sponsors position size, without sending back `collateralCurrency`.
      * This is done by a sponsor to increase position CR. Resulting size is bounded by minSponsorTokens.
      * @dev Can only be called by token sponsor. This contract must be approved to spend `numTokens` of `tokenCurrency`.
@@ -464,6 +561,7 @@ contract PricelessPositionManager is FeePayer {
         public
         onlyPreExpiration()
         noPendingWithdrawal(msg.sender)
+        noPendingCreation(msg.sender)
         fees()
         nonReentrant()
     {
@@ -497,6 +595,7 @@ contract PricelessPositionManager is FeePayer {
     function redeem(FixedPoint.Unsigned memory numTokens)
         public
         noPendingWithdrawal(msg.sender)
+        noPendingCreation(msg.sender)
         fees()
         nonReentrant()
         returns (FixedPoint.Unsigned memory amountWithdrawn)
@@ -858,6 +957,12 @@ contract PricelessPositionManager is FeePayer {
         positionData.withdrawalRequestPassTimestamp = 0;
     }
 
+    // Reset creation request by setting the creation request and creation timestamp to 0.
+    function _resetCreationRequest(PositionData storage positionData) internal {
+        positionData.creationRequestAmount = FixedPoint.fromUnscaledUint(0);
+        positionData.creationRequestPassTimestamp = 0;
+    }
+
     // Ensure individual and global consistency when increasing collateral balances. Returns the change to the position.
     function _incrementCollateralBalances(
         PositionData storage positionData,
@@ -918,6 +1023,13 @@ contract PricelessPositionManager is FeePayer {
     // or tokens outstanding) which would fail the `onlyCollateralizedPosition` modifier on `_getPositionData`.
     function _positionHasNoPendingWithdrawal(address sponsor) internal view {
         require(_getPositionData(sponsor).withdrawalRequestPassTimestamp == 0, "Pending withdrawal");
+    }
+
+    // Note: This checks whether an already existing position has a pending creation. This cannot be used on the
+    // `create` method because it is possible that `create` is called on a new position (i.e. one without any collateral
+    // or tokens outstanding) which would fail the `onlyCollateralizedPosition` modifier on `_getPositionData`.
+    function _positionHasNoPendingCreation(address sponsor) internal view {
+        require(_getPositionData(sponsor).creationRequestPassTimestamp == 0, "Pending creation");
     }
 
     /****************************************
