@@ -820,7 +820,8 @@ contract PricelessPositionManager is FeePayer {
         address sponsor,
         FixedPoint.Unsigned memory tokensToRemove,
         FixedPoint.Unsigned memory collateralToRemove,
-        FixedPoint.Unsigned memory withdrawalAmountToRemove
+        FixedPoint.Unsigned memory withdrawalAmountToRemove,
+        FixedPoint.Unsigned memory creationAmountToRemove
     ) internal {
         PositionData storage positionData = _getPositionData(sponsor);
 
@@ -843,6 +844,9 @@ contract PricelessPositionManager is FeePayer {
 
         // Decrement the position's withdrawal amount.
         positionData.withdrawalRequestAmount = positionData.withdrawalRequestAmount.sub(withdrawalAmountToRemove);
+
+        // Decrement the position's creation amount.
+        positionData.creationRequestAmount = positionData.creationRequestAmount.sub(creationAmountToRemove);
 
         // Decrement the total outstanding tokens in the overall contract.
         totalTokensOutstanding = totalTokensOutstanding.sub(tokensToRemove);

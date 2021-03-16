@@ -69,6 +69,7 @@ contract Liquidatable is PricelessPositionManager {
         address financialProductLibraryAddress;
         bytes32 priceFeedIdentifier;
         FixedPoint.Unsigned minSponsorTokens;
+        FixedPoint.Unsigned minCreationCollateral;
         // Params specifically for Liquidatable.
         uint256 liquidationLiveness;
         FixedPoint.Unsigned collateralRequirement;
@@ -182,6 +183,7 @@ contract Liquidatable is PricelessPositionManager {
             params.finderAddress,
             params.priceFeedIdentifier,
             params.minSponsorTokens,
+            params.minCreationCollateral,
             params.timerAddress,
             params.financialProductLibraryAddress
         )
@@ -241,8 +243,17 @@ contract Liquidatable is PricelessPositionManager {
         // Retrieve Position data for sponsor
         PositionData storage positionToLiquidate = _getPositionData(sponsor);
 
-        tokensLiquidated = FixedPoint.min(maxTokensToLiquidate, positionToLiquidate.tokensOutstanding);
-        require(tokensLiquidated.isGreaterThan(0));
+        // Account for tokens pending creation
+        FixedPoint.Unsigned memory liquidatableTokens = positionToLiquidate.tokensOutstanding.add(positionToLiquidate.creationRequestAmount);
+        FixedPoint.Unsigned memory virtualTokensLiquidated = FixedPoint.min(maxTokensToLiquidate, liquidatableTokens);
+        require(virtualTokensLiquidated.isGreaterThan(0));
+
+        // Liquidate without burning liquidator's tokens as much as possible
+        tokensLiquidated = FixedPoint.fromUnscaledUint(0);
+        if (positionToLiquidate.creationRequestAmount.isLessThanOrEqual(virtualTokensLiquidated)) {
+            tokensLiquidated = virtualTokensLiquidated.sub(positionToLiquidate.creationRequestAmount);
+        }
+        
 
         // Starting values for the Position being liquidated. If withdrawal request amount is > position's collateral,
         // then set this to 0, otherwise set it to (startCollateral - withdrawal request amount).
@@ -254,7 +265,7 @@ contract Liquidatable is PricelessPositionManager {
 
         // Scoping to get rid of a stack too deep error.
         {
-            FixedPoint.Unsigned memory startTokens = positionToLiquidate.tokensOutstanding;
+            FixedPoint.Unsigned memory startTokens = liquidatableTokens;
 
             // The Position's collateralization ratio must be between [minCollateralPerToken, maxCollateralPerToken].
             // maxCollateralPerToken >= startCollateralNetOfWithdrawal / startTokens.
@@ -278,7 +289,7 @@ contract Liquidatable is PricelessPositionManager {
 
         // Scoping to get rid of a stack too deep error.
         {
-            FixedPoint.Unsigned memory ratio = tokensLiquidated.div(positionToLiquidate.tokensOutstanding);
+            FixedPoint.Unsigned memory ratio = virtualTokensLiquidated.div(liquidatableTokens);
 
             // The actual amount of collateral that gets moved to the liquidation.
             lockedCollateral = startCollateral.mul(ratio);
@@ -291,7 +302,11 @@ contract Liquidatable is PricelessPositionManager {
             // liquidatedCollateral + withdrawalAmountToRemove = lockedCollateral.
             FixedPoint.Unsigned memory withdrawalAmountToRemove =
                 positionToLiquidate.withdrawalRequestAmount.mul(ratio);
-            _reduceSponsorPosition(sponsor, tokensLiquidated, lockedCollateral, withdrawalAmountToRemove);
+            // Part of the creation request is also removed. Ideally:
+            // liquidatedCollateral + withdrawalAmountToRemove = lockedCollateral.
+            FixedPoint.Unsigned memory creationAmountToRemove = virtualTokensLiquidated.sub(tokensLiquidated);
+
+            _reduceSponsorPosition(sponsor, tokensLiquidated, lockedCollateral, withdrawalAmountToRemove, creationAmountToRemove);
         }
 
         // Add to the global liquidation collateral count.
@@ -307,6 +322,7 @@ contract Liquidatable is PricelessPositionManager {
                 liquidator: msg.sender,
                 state: Status.NotDisputed,
                 liquidationTime: getCurrentTime(),
+                /* TODO: use real or virtual? check withdrawLiquidation */
                 tokensOutstanding: tokensLiquidated,
                 lockedCollateral: lockedCollateral,
                 liquidatedCollateral: liquidatedCollateral,
@@ -320,7 +336,7 @@ contract Liquidatable is PricelessPositionManager {
         // If this liquidation is a subsequent liquidation on the position, and the liquidation size is larger than
         // some "griefing threshold", then re-set the liveness. This enables a liquidation against a withdraw request to be
         // "dragged out" if the position is very large and liquidators need time to gather funds. The griefing threshold
-        // is enforced so that liquidations for trivially small # of tokens cannot drag out an honest sponsor's slow withdrawal.
+        // is enforced so that liquidations for trivially small # of tokens cannot drag out an honest sponsor's slow withdrawal or creation.
 
         // We arbitrarily set the "griefing threshold" to `minSponsorTokens` because it is the only parameter
         // denominated in token currency units and we can avoid adding another parameter.
@@ -332,11 +348,20 @@ contract Liquidatable is PricelessPositionManager {
         ) {
             positionToLiquidate.withdrawalRequestPassTimestamp = getCurrentTime().add(withdrawalLiveness);
         }
+        /* TODO: is it necessary? */
+        if (
+            positionToLiquidate.creationRequestPassTimestamp > 0 && // The position is undergoing a slow creation.
+            positionToLiquidate.creationRequestPassTimestamp > getCurrentTime() && // The slow creation has not yet expired.
+            tokensLiquidated.isGreaterThanOrEqual(griefingThreshold) // The liquidated token count is above a "griefing threshold".
+        ) {
+            positionToLiquidate.creationRequestPassTimestamp = getCurrentTime().add(withdrawalLiveness);
+        }
 
         emit LiquidationCreated(
             sponsor,
             msg.sender,
             liquidationId,
+            /* TODO: use real or virtual? */
             tokensLiquidated.rawValue,
             lockedCollateral.rawValue,
             liquidatedCollateral.rawValue,
