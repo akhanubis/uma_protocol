@@ -53,8 +53,8 @@ contract PricelessPositionManager is FeePayer {
         // Tracks pending transfer position requests. A transfer position request is pending if `transferPositionRequestPassTimestamp != 0`.
         uint256 transferPositionRequestPassTimestamp;
         // Tracks pending creation requests. A creation request is pending if `creationRequestPassTimestamp != 0`.
-        uint256 withdrawalRequestPassTimestamp;
-        FixedPoint.Unsigned withdrawalRequestAmount;
+        uint256 creationRequestPassTimestamp;
+        FixedPoint.Unsigned creationRequestAmount;
     }
 
     // Maps sponsor addresses to their positions. Each sponsor can have only one position.
